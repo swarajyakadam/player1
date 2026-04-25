@@ -43,6 +43,7 @@ function App() {
       const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true })
       streamRef.current = stream
       videoRef.current.srcObject = stream
+      videoRef.current.muted = true
       videoRef.current.play()
       setIsScreenShare(true)
       setPlaying(true)
