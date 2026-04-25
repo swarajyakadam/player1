@@ -39,8 +39,14 @@ export default function App() {
   const [hasVideo, setHasVideo] = useState(false)
   const [copied, setCopied] = useState(false)
   const [urlInput, setUrlInput] = useState('')
-  const [transferProgress, setTransferProgress] = useState(0) // 0-100
+  const [transferProgress, setTransferProgress] = useState(0)
   const [transferring, setTransferring] = useState(false)
+  const [chatOpen, setChatOpen] = useState(false)
+  const [messages, setMessages] = useState([])
+  const [chatInput, setChatInput] = useState('')
+  const [unread, setUnread] = useState(0)
+  const chatEndRef = useRef(null)
+  const [isFullscreen, setIsFullscreen] = useState(false)
 
   // ── BROADCAST ─────────────────────────────────────
   function broadcast(msg, excludePeer) {
@@ -304,8 +310,17 @@ export default function App() {
       setTimeout(() => { isSyncRef.current = false }, 500)
     }
 
+    // chat
+    if (msg.t === 'chat') {
+      setMessages(prev => [...prev, { from: msg.from, text: msg.text, time: msg.time }])
+      setChatOpen(prev => { if (!prev) setUnread(u => u + 1); return prev })
+    }
+
     // if viewer triggers play/pause, broadcast to everyone (both directions)
     if (mode === 'host' && (msg.t === 'play' || msg.t === 'pause' || msg.t === 'seek')) {
+      broadcast(msg, fromPeer)
+    }
+    if (mode === 'host' && msg.t === 'chat') {
       broadcast(msg, fromPeer)
     }
   }
@@ -323,6 +338,27 @@ export default function App() {
       conn?.send({ t: 'pause', time: v.currentTime })
     }
   }
+
+  useEffect(() => {
+    const onChange = () => setIsFullscreen(!!document.fullscreenElement)
+    document.addEventListener('fullscreenchange', onChange)
+    return () => document.removeEventListener('fullscreenchange', onChange)
+  }, [])
+
+  function sendChat(e) {
+    e.preventDefault()
+    if (!chatInput.trim()) return
+    const msg = { t: 'chat', from: mode === 'host' ? '👑 Host' : '👤 You', text: chatInput.trim(), time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }
+    const outMsg = { ...msg, from: mode === 'host' ? '👑 Host' : '👤 Viewer' }
+    setMessages(prev => [...prev, { ...msg, from: mode === 'host' ? '👑 You (Host)' : '👤 You' }])
+    if (mode === 'host') broadcast(outMsg)
+    else connsRef.current['host']?.send(outMsg)
+    setChatInput('')
+  }
+
+  useEffect(() => {
+    if (chatOpen) { setUnread(0); chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }
+  }, [messages, chatOpen])
 
   function toggleFullscreen() {
     if (!document.fullscreenElement) videoRef.current.requestFullscreen()
@@ -422,6 +458,43 @@ export default function App() {
             <button onClick={viewerTogglePlay}>{playing ? '⏸ Pause' : '▶ Play'}</button>
           )}
           <button onClick={toggleFullscreen}>⛶ Fullscreen</button>
+        </div>
+      )}
+
+      {isFullscreen && unread > 0 && (
+        <div className="fs-chat-hint" onClick={() => { document.exitFullscreen(); setChatOpen(true) }}>
+          <span>{unread}</span>
+        </div>
+      )}
+
+      {mode && (
+        <div className={`chat-panel ${chatOpen ? 'open' : ''}`}>
+          <button className="chat-toggle" onClick={() => setChatOpen(o => !o)}>
+            {chatOpen ? '✕' : '💬'}
+            {!chatOpen && unread > 0 && <span className="badge">{unread}</span>}
+          </button>
+          {chatOpen && (
+            <>
+              <div className="chat-messages">
+                {messages.length === 0 && <p className="chat-empty">No messages yet</p>}
+                {messages.map((m, i) => (
+                  <div key={i} className="chat-msg">
+                    <span className="chat-from">{m.from}</span>
+                    <span className="chat-time">{m.time}</span>
+                    <p className="chat-text">{m.text}</p>
+                  </div>
+                ))}
+                <div ref={chatEndRef} />
+              </div>
+              <form className="chat-form" onSubmit={sendChat}>
+                <input
+                  type="text" placeholder="Type a message..."
+                  value={chatInput} onChange={e => setChatInput(e.target.value)}
+                />
+                <button type="submit">Send</button>
+              </form>
+            </>
+          )}
         </div>
       )}
     </div>
