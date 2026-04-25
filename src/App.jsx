@@ -52,6 +52,8 @@ function App() {
       conn.on('open', () => {
         setViewerCount(v => v + 1)
         setStatus(`Viewer connected!`)
+        // send confirmation to viewer
+        conn.send({ type: 'connected' })
         // if already sharing, call this viewer immediately
         if (streamRef.current) {
           callViewer(peer, conn.peer, streamRef.current)
@@ -128,7 +130,11 @@ function App() {
       const conn = peer.connect(id, { reliable: true })
 
       conn.on('open', () => {
-        setStatus('Connected! Waiting for host to share screen...')
+        setStatus('Reached host! Waiting for screen share...')
+      })
+
+      conn.on('data', msg => {
+        if (msg?.type === 'connected') setStatus('✅ Connected to host! Waiting for screen share...')
       })
 
       conn.on('error', err => {
