@@ -13,10 +13,100 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 12px;
+  gap: 14px;
   width: 100%;
   max-width: 800px;
   padding: 16px;
+}
+
+.room-section {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  flex-wrap: wrap;
+}
+
+.room-box {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: #1e1e1e;
+  padding: 20px;
+  border-radius: 10px;
+  min-width: 200px;
+}
+
+.room-box h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.room-box input {
+  padding: 8px 12px;
+  border: none;
+  border-radius: 6px;
+  background: #2a2a2a;
+  color: #fff;
+  font-size: 14px;
+  outline: none;
+}
+
+.room-box input:focus {
+  outline: 2px solid #555;
+}
+
+.divider {
+  font-size: 14px;
+  color: #888;
+  padding: 8px;
+}
+
+.primary-btn {
+  padding: 10px 20px;
+  border: none;
+  border-radius: 6px;
+  background: #0078d4;
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.primary-btn:hover {
+  background: #005fa3;
+}
+
+.room-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #1e1e1e;
+  padding: 10px 16px;
+  border-radius: 8px;
+  width: 100%;
+  box-sizing: border-box;
+  flex-wrap: wrap;
+}
+
+.room-info button {
+  padding: 6px 14px;
+  border: none;
+  border-radius: 6px;
+  background: #0078d4;
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.room-info button:hover {
+  background: #005fa3;
+}
+
+.status {
+  margin: 0;
+  font-size: 13px;
+  color: #aaa;
 }
 
 .url-bar {
@@ -64,10 +154,10 @@ body {
   display: flex;
   gap: 12px;
   align-items: center;
+  flex-wrap: wrap;
 }
 
-.controls button,
-.controls select {
+.controls button {
   padding: 8px 16px;
   border: none;
   border-radius: 6px;
@@ -77,7 +167,6 @@ body {
   cursor: pointer;
 }
 
-.controls button:hover,
-.controls select:hover {
+.controls button:hover {
   background: #555;
 }
