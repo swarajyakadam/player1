@@ -16,7 +16,6 @@ const CHUNK = 64 * 1024 // 64KB chunks
 
 function makePeer(id) {
   return new Peer(id || undefined, {
-    host: 'peerjs.com', port: 443, path: '/', secure: true,
     config: ICE, debug: 0
   })
 }
