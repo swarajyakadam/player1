@@ -9,14 +9,41 @@ const ICE = {
     { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
     { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
     { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
-  ]
+  ],
+  iceCandidatePoolSize: 10,
+  iceTransportPolicy: 'all',
+  bundlePolicy: 'max-bundle',
+  rtcpMuxPolicy: 'require',
 }
 
-const CHUNK = 64 * 1024 // 64KB chunks
+const CHUNK = 256 * 1024
+
+async function uploadToCloud(file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    const form = new FormData()
+    form.append('file', file)
+    xhr.open('POST', 'https://file.io/?expires=1d')
+    xhr.upload.onprogress = e => {
+      if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100))
+    }
+    xhr.onload = () => {
+      try {
+        const res = JSON.parse(xhr.responseText)
+        if (res.success) resolve(res.link)
+        else reject('Upload failed')
+      } catch { reject('Upload failed') }
+    }
+    xhr.onerror = () => reject('Network error')
+    xhr.send(form)
+  })
+}
 
 function makePeer(id) {
   return new Peer(id || undefined, {
-    config: ICE, debug: 0
+    config: ICE,
+    debug: 0,
+    pingInterval: 3000,
   })
 }
 
@@ -93,19 +120,33 @@ export default function App() {
     })
 
     peer.on('error', e => setStatus('❌ ' + e.type))
+
+    peer.on('disconnected', () => {
+      setStatus('⚠️ Network issue — reconnecting...')
+      setTimeout(() => peer.reconnect(), 2000)
+    })
   }
 
   // send file to a single connection in chunks
   async function sendFileTo(conn, file) {
     const totalChunks = Math.ceil(file.size / CHUNK)
     conn.send({ t: 'file-start', name: file.name, size: file.size, total: totalChunks })
-    for (let i = 0; i < totalChunks; i++) {
-      const slice = file.slice(i * CHUNK, (i + 1) * CHUNK)
-      const buf = await slice.arrayBuffer()
-      conn.send({ t: 'file-chunk', index: i, data: buf })
-      setTransferProgress(Math.round(((i + 1) / totalChunks) * 100))
-      // small delay to avoid overwhelming the channel
-      await new Promise(r => setTimeout(r, 5))
+
+    // send in parallel batches of 4 chunks for max speed
+    const BATCH = 4
+    for (let i = 0; i < totalChunks; i += BATCH) {
+      const batch = []
+      for (let j = i; j < Math.min(i + BATCH, totalChunks); j++) {
+        const slice = file.slice(j * CHUNK, (j + 1) * CHUNK)
+        batch.push(slice.arrayBuffer().then(buf => ({ index: j, buf })))
+      }
+      const results = await Promise.all(batch)
+      results.forEach(({ index, buf }) => {
+        conn.send({ t: 'file-chunk', index, data: buf })
+      })
+      setTransferProgress(Math.round((Math.min(i + BATCH, totalChunks) / totalChunks) * 100))
+      // tiny yield to keep UI responsive, no artificial delay
+      await new Promise(r => setTimeout(r, 0))
     }
     conn.send({ t: 'file-end' })
   }
@@ -123,18 +164,31 @@ export default function App() {
     setPlaying(false)
     setStatus(`📁 ${file.name} loaded`)
 
-    // send file to all connected viewers
     const conns = Object.values(connsRef.current).filter(c => c.open)
     if (conns.length > 0) {
       setTransferring(true)
-      setStatus(`📤 Sending video to ${conns.length} viewer(s)...`)
-      await Promise.all(conns.map(conn => sendFileTo(conn, file)))
+      setStatus(`📤 Sending to ${conns.length} viewer(s)...`)
+      // pre-read entire file into ArrayBuffer once, then send to all
+      const fullBuf = await file.arrayBuffer()
+      const totalChunks = Math.ceil(fullBuf.byteLength / CHUNK)
+
+      await Promise.all(conns.map(async conn => {
+        conn.send({ t: 'file-start', name: file.name, size: file.size, total: totalChunks })
+        const BATCH = 4
+        for (let i = 0; i < totalChunks; i += BATCH) {
+          for (let j = i; j < Math.min(i + BATCH, totalChunks); j++) {
+            conn.send({ t: 'file-chunk', index: j, data: fullBuf.slice(j * CHUNK, (j + 1) * CHUNK) })
+          }
+          setTransferProgress(Math.round((Math.min(i + BATCH, totalChunks) / totalChunks) * 100))
+          await new Promise(r => setTimeout(r, 0))
+        }
+        conn.send({ t: 'file-end' })
+      }))
+
       setTransferring(false)
       setTransferProgress(0)
       setStatus(`✅ Video sent to all viewers`)
     }
-
-    // store file ref for future viewers
     peerRef.current._videoFile = file
   }
 
@@ -220,13 +274,58 @@ export default function App() {
     setMode('viewer')
     setStatus('🔄 Connecting...')
 
-    peer.on('open', () => {
-      const conn = peer.connect(id, { reliable: true })
-      conn.on('open', () => setStatus('✅ Connected — waiting for host'))
+    let retries = 0
+    const maxRetries = 3
+
+    function tryConnect() {
+      const conn = peer.connect(id, {
+        reliable: true,
+        serialization: 'binary',
+      })
+
+      // timeout if not connected in 8s
+      const timeout = setTimeout(() => {
+        if (!conn.open) {
+          conn.close()
+          if (retries < maxRetries) {
+            retries++
+            setStatus(`🔄 Retrying... (${retries}/${maxRetries})`)
+            tryConnect()
+          } else {
+            setStatus('❌ Could not connect. Check Room ID or ask host to recreate room.')
+          }
+        }
+      }, 8000)
+
+      conn.on('open', () => {
+        clearTimeout(timeout)
+        retries = 0
+        connsRef.current['host'] = conn
+        setStatus('✅ Connected — waiting for host')
+      })
       conn.on('data', msg => handleData(msg, null))
-      conn.on('close', () => setStatus('⚠️ Host disconnected'))
-      conn.on('error', () => setStatus('❌ Connection error'))
-      connsRef.current['host'] = conn
+      conn.on('close', () => {
+        setStatus('⚠️ Disconnected — reconnecting...')
+        setTimeout(() => {
+          if (peer.disconnected) peer.reconnect()
+          else tryConnect()
+        }, 2000)
+      })
+      conn.on('error', () => {
+        clearTimeout(timeout)
+        if (retries < maxRetries) {
+          retries++
+          setStatus(`🔄 Retrying... (${retries}/${maxRetries})`)
+          setTimeout(tryConnect, 2000)
+        } else {
+          setStatus('❌ Connection failed. Check Room ID.')
+        }
+      })
+    }
+
+    peer.on('open', () => {
+      setStatus('🔄 Reaching host...')
+      tryConnect()
     })
 
     peer.on('call', call => {
@@ -246,7 +345,19 @@ export default function App() {
       call.on('close', () => { setIsScreen(false); setHasVideo(false); setStatus('Screen share ended') })
     })
 
-    peer.on('error', e => setStatus('❌ ' + e.type + ' — wrong Room ID?'))
+    peer.on('disconnected', () => {
+      setStatus('⚠️ Network issue — reconnecting...')
+      setTimeout(() => peer.reconnect(), 2000)
+    })
+
+    peer.on('error', e => {
+      if (e.type === 'network' || e.type === 'disconnected') {
+        setStatus('⚠️ Network issue — retrying...')
+        setTimeout(() => peer.reconnect(), 2000)
+      } else {
+        setStatus('❌ ' + e.type + ' — wrong Room ID?')
+      }
+    })
   }
 
   // ── SHARED DATA HANDLER ───────────────────────────
