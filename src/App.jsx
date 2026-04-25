@@ -313,7 +313,7 @@ export default function App() {
     // chat
     if (msg.t === 'chat') {
       setMessages(prev => [...prev, { from: msg.from, text: msg.text, time: msg.time }])
-      setChatOpen(prev => { if (!prev) setUnread(u => u + 1); return prev })
+      setUnread(u => u + 1)
     }
 
     // if viewer triggers play/pause, broadcast to everyone (both directions)
@@ -348,16 +348,19 @@ export default function App() {
   function sendChat(e) {
     e.preventDefault()
     if (!chatInput.trim()) return
-    const msg = { t: 'chat', from: mode === 'host' ? '👑 Host' : '👤 You', text: chatInput.trim(), time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }
-    const outMsg = { ...msg, from: mode === 'host' ? '👑 Host' : '👤 Viewer' }
-    setMessages(prev => [...prev, { ...msg, from: mode === 'host' ? '👑 You (Host)' : '👤 You' }])
+    const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    const outMsg = { t: 'chat', from: mode === 'host' ? '👑 Host' : '👤 Viewer', text: chatInput.trim(), time }
+    setMessages(prev => [...prev, { ...outMsg, from: mode === 'host' ? '👑 You (Host)' : '👤 You' }])
     if (mode === 'host') broadcast(outMsg)
     else connsRef.current['host']?.send(outMsg)
     setChatInput('')
   }
 
   useEffect(() => {
-    if (chatOpen) { setUnread(0); chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }
+    if (chatOpen) {
+      setUnread(0)
+      chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }
   }, [messages, chatOpen])
 
   function toggleFullscreen() {
@@ -446,9 +449,22 @@ export default function App() {
           className="video"
           onSeeked={() => mode === 'host' && !isSyncRef.current && hostSeek()}
           onEnded={() => setPlaying(false)}
+          onClick={() => setChatOpen(false)}
+          onDoubleClick={() => {
+            const v = videoRef.current
+            if (v.paused) {
+              v.play(); setPlaying(true)
+              if (mode === 'host') broadcast({ t: 'play', time: v.currentTime })
+              else connsRef.current['host']?.send({ t: 'play', time: v.currentTime })
+            } else {
+              v.pause(); setPlaying(false)
+              if (mode === 'host') broadcast({ t: 'pause', time: v.currentTime })
+              else connsRef.current['host']?.send({ t: 'pause', time: v.currentTime })
+            }
+          }}
         />
-        {unread > 0 && (
-          <div className="fs-chat-hint" onClick={() => { if (document.fullscreenElement) document.exitFullscreen(); setChatOpen(true); setUnread(0) }}>
+        {unread > 0 && !chatOpen && (
+          <div className="fs-chat-hint" onClick={() => { if (document.fullscreenElement) document.exitFullscreen(); setChatOpen(true) }}>
             <span>{unread}</span>
           </div>
         )}
