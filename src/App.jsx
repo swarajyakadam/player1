@@ -5,20 +5,12 @@ import './App.css'
 const iceServers = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'stun:stun2.l.google.com:19302' },
-  { urls: 'stun:stun3.l.google.com:19302' },
   { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
   { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
   { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
 ]
 
-const peerConfig = { config: { iceServers, iceTransportPolicy: 'all' } }
-
-const sdpTransform = (sdp) => {
-  sdp = sdp.replace(/b=AS:\d+/g, 'b=AS:4096')
-  sdp = sdp.replace(/a=mid:audio/g, 'a=mid:audio\r\nb=AS:256')
-  return sdp
-}
+const peerConfig = { config: { iceServers } }
 
 function App() {
   const videoRef = useRef(null)
@@ -44,30 +36,44 @@ function App() {
     setMode('host')
     setStatus('Waiting for viewers to join...')
 
-    peer.on('connection', conn => {
-      connectionsRef.current.push(conn)
-      setStatus(`${connectionsRef.current.length} viewer(s) connected`)
+    peer.on('open', () => {
+      setStatus('Room ready. Waiting for viewers...')
     })
 
-    peer.on('call', call => call.answer())
+    // when a viewer connects, if already sharing — call them immediately
+    peer.on('connection', conn => {
+      conn.on('open', () => {
+        connectionsRef.current.push(conn)
+        setStatus(`${connectionsRef.current.length} viewer(s) connected`)
+
+        // if screen share is already active, call this new viewer right away
+        if (streamRef.current) {
+          const call = peer.call(conn.peer, streamRef.current)
+          call.on('error', err => console.error(err))
+        }
+      })
+    })
   }
 
   const startScreenShare = async () => {
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: { ideal: 60, max: 60 }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+        video: { frameRate: { ideal: 30 }, width: { ideal: 1920 }, height: { ideal: 1080 } },
         audio: { echoCancellation: false, noiseSuppression: false, sampleRate: 48000 }
       })
       streamRef.current = stream
-      videoRef.current.srcObject = stream
-      videoRef.current.muted = true
-      videoRef.current.play()
+
+      const v = videoRef.current
+      v.srcObject = stream
+      v.muted = true
+      v.play()
       setIsScreenShare(true)
       setPlaying(true)
 
+      // call all already-connected viewers
       connectionsRef.current.forEach(conn => {
-        const call = peerRef.current.call(conn.peer, stream, { sdpTransform })
-        call.on('error', err => console.error('Call error:', err))
+        const call = peerRef.current.call(conn.peer, stream)
+        call.on('error', err => console.error('call error:', err))
       })
 
       stream.getVideoTracks()[0].onended = stopScreenShare
@@ -87,34 +93,46 @@ function App() {
 
   const joinRoom = () => {
     if (!joinId.trim()) return
+    const id = joinId.trim().includes('room=')
+      ? new URLSearchParams(joinId.trim().split('?')[1]).get('room')
+      : joinId.trim()
+
     const peer = new Peer(undefined, peerConfig)
     peerRef.current = peer
     setMode('viewer')
     setStatus('Connecting...')
 
     peer.on('open', () => {
-      const conn = peer.connect(joinId.trim())
-      conn.on('open', () => setStatus('Connected! Waiting for host to share screen...'))
+      // send connection request to host so host knows we exist
+      const conn = peer.connect(id)
+      conn.on('open', () => {
+        setStatus('Connected! Waiting for host to share screen...')
+      })
       conn.on('error', () => setStatus('Failed to connect to room'))
     })
 
+    // host will call us when screen share starts
     peer.on('call', call => {
-      call.answer()
+      call.answer() // answer with no stream (viewer has nothing to send)
       call.on('stream', remoteStream => {
         const v = videoRef.current
         v.srcObject = remoteStream
         v.muted = false
         v.volume = 1
-        v.preload = 'auto'
-        // small buffer delay to smooth over network hiccups
-        v.play().catch(() => setStatus('Click ▶ Play to start watching'))
-        setPlaying(true)
-        setStatus('Watching live stream')
+        v.play()
+          .then(() => { setPlaying(true); setStatus('🟢 Watching live') })
+          .catch(() => setStatus('Click ▶ Play to watch'))
       })
-      call.on('error', () => setStatus('Stream error, try rejoining'))
+      call.on('error', err => {
+        console.error(err)
+        setStatus('Stream error. Try rejoining.')
+      })
     })
 
-    peer.on('error', () => setStatus('Connection error. Check the room ID.'))
+    peer.on('error', err => {
+      console.error(err)
+      setStatus('Connection error. Check the Room ID.')
+    })
   }
 
   const handleLoad = () => {
@@ -173,7 +191,7 @@ function App() {
             <h3>👀 Join a Stream</h3>
             <input
               type="text"
-              placeholder="Enter Room ID or paste link"
+              placeholder="Enter Room ID or paste invite link"
               value={joinId}
               onChange={e => setJoinId(e.target.value)}
             />
