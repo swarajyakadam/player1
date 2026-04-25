@@ -361,7 +361,8 @@ export default function App() {
   }, [messages, chatOpen])
 
   function toggleFullscreen() {
-    if (!document.fullscreenElement) videoRef.current.requestFullscreen()
+    const container = videoRef.current.parentElement
+    if (!document.fullscreenElement) container.requestFullscreen()
     else document.exitFullscreen()
   }
 
@@ -439,13 +440,19 @@ export default function App() {
         </div>
       )}
 
-      <video
-        ref={videoRef}
-        className="video"
-        onSeeked={() => mode === 'host' && !isSyncRef.current && hostSeek()}
-        onEnded={() => setPlaying(false)}
-        style={{ display: hasVideo ? 'block' : 'none' }}
-      />
+      <div className="video-container" style={{ display: hasVideo ? 'block' : 'none' }}>
+        <video
+          ref={videoRef}
+          className="video"
+          onSeeked={() => mode === 'host' && !isSyncRef.current && hostSeek()}
+          onEnded={() => setPlaying(false)}
+        />
+        {unread > 0 && (
+          <div className="fs-chat-hint" onClick={() => { if (document.fullscreenElement) document.exitFullscreen(); setChatOpen(true); setUnread(0) }}>
+            <span>{unread}</span>
+          </div>
+        )}
+      </div>
 
       {hasVideo && (
         <div className="controls">
@@ -458,12 +465,6 @@ export default function App() {
             <button onClick={viewerTogglePlay}>{playing ? '⏸ Pause' : '▶ Play'}</button>
           )}
           <button onClick={toggleFullscreen}>⛶ Fullscreen</button>
-        </div>
-      )}
-
-      {isFullscreen && unread > 0 && (
-        <div className="fs-chat-hint" onClick={() => { document.exitFullscreen(); setChatOpen(true) }}>
-          <span>{unread}</span>
         </div>
       )}
 
