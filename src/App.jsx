@@ -2,13 +2,31 @@ import { useRef, useState, useEffect } from 'react'
 import Peer from 'peerjs'
 import './App.css'
 
+const iceServers = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun2.l.google.com:19302' },
+  { urls: 'stun:stun3.l.google.com:19302' },
+  { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+]
+
+const peerConfig = { config: { iceServers, iceTransportPolicy: 'all' } }
+
+const sdpTransform = (sdp) => {
+  sdp = sdp.replace(/b=AS:\d+/g, 'b=AS:4096')
+  sdp = sdp.replace(/a=mid:audio/g, 'a=mid:audio\r\nb=AS:256')
+  return sdp
+}
+
 function App() {
   const videoRef = useRef(null)
   const peerRef = useRef(null)
   const streamRef = useRef(null)
   const connectionsRef = useRef([])
 
-  const [mode, setMode] = useState(null) // 'host' | 'viewer'
+  const [mode, setMode] = useState(null)
   const [roomId, setRoomId] = useState('')
   const [joinId, setJoinId] = useState('')
   const [inputUrl, setInputUrl] = useState('')
@@ -18,10 +36,9 @@ function App() {
   const [status, setStatus] = useState('')
   const [copied, setCopied] = useState(false)
 
-  // HOST: create peer with room ID
   const startAsHost = () => {
     const id = 'room-' + Math.random().toString(36).substr(2, 8)
-    const peer = new Peer(id)
+    const peer = new Peer(id, peerConfig)
     peerRef.current = peer
     setRoomId(id)
     setMode('host')
@@ -32,15 +49,15 @@ function App() {
       setStatus(`${connectionsRef.current.length} viewer(s) connected`)
     })
 
-    peer.on('call', call => {
-      call.answer()
-    })
+    peer.on('call', call => call.answer())
   }
 
-  // HOST: share screen and stream to all viewers
   const startScreenShare = async () => {
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true })
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: { ideal: 60, max: 60 }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+        audio: { echoCancellation: false, noiseSuppression: false, sampleRate: 48000 }
+      })
       streamRef.current = stream
       videoRef.current.srcObject = stream
       videoRef.current.muted = true
@@ -48,9 +65,9 @@ function App() {
       setIsScreenShare(true)
       setPlaying(true)
 
-      // call all connected viewers
       connectionsRef.current.forEach(conn => {
-        peerRef.current.call(conn.peer, stream)
+        const call = peerRef.current.call(conn.peer, stream, { sdpTransform })
+        call.on('error', err => console.error('Call error:', err))
       })
 
       stream.getVideoTracks()[0].onended = stopScreenShare
@@ -68,10 +85,9 @@ function App() {
     setStatus('Screen share stopped')
   }
 
-  // VIEWER: join a room
   const joinRoom = () => {
     if (!joinId.trim()) return
-    const peer = new Peer()
+    const peer = new Peer(undefined, peerConfig)
     peerRef.current = peer
     setMode('viewer')
     setStatus('Connecting...')
@@ -85,17 +101,22 @@ function App() {
     peer.on('call', call => {
       call.answer()
       call.on('stream', remoteStream => {
-        videoRef.current.srcObject = remoteStream
-        videoRef.current.play()
+        const v = videoRef.current
+        v.srcObject = remoteStream
+        v.muted = false
+        v.volume = 1
+        v.preload = 'auto'
+        // small buffer delay to smooth over network hiccups
+        v.play().catch(() => setStatus('Click ▶ Play to start watching'))
         setPlaying(true)
         setStatus('Watching live stream')
       })
+      call.on('error', () => setStatus('Stream error, try rejoining'))
     })
 
     peer.on('error', () => setStatus('Connection error. Check the room ID.'))
   }
 
-  // URL video load
   const handleLoad = () => {
     if (!inputUrl.trim()) return
     stopScreenShare()
@@ -131,13 +152,10 @@ function App() {
     setTimeout(() => setCopied(false), 2000)
   }
 
-  // Auto-join if URL has ?room=
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     const room = params.get('room')
-    if (room) {
-      setJoinId(room)
-    }
+    if (room) setJoinId(room)
   }, [])
 
   return (
