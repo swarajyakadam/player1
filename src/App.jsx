@@ -16,7 +16,7 @@ const ICE = {
   rtcpMuxPolicy: 'require',
 }
 
-const CHUNK = 256 * 1024 // 256KB raw binary chunks
+const CHUNK = 256 * 1024 // 256KB binary chunks
 
 const PEER_SERVER = import.meta.env.VITE_PEER_SERVER || '0.peerjs.com'
 const PEER_PORT   = import.meta.env.VITE_PEER_PORT ? parseInt(import.meta.env.VITE_PEER_PORT) : 443
@@ -29,38 +29,47 @@ function makePeer(id) {
   })
 }
 
-export default function App() {
-  const videoRef    = useRef(null)
-  const peerRef     = useRef(null)
-  const connsRef    = useRef({})
-  const streamRef   = useRef(null)
-  const callsRef    = useRef([])
-  const chunksRef   = useRef([])
-  const isSyncRef   = useRef(false)
+function isFileMeta(data) {
+  return data && typeof data === 'object' && !(data instanceof ArrayBuffer) && !ArrayBuffer.isView(data)
+}
 
-  const [mode, setMode]                     = useState(null)
-  const [roomId, setRoomId]                 = useState('')
-  const [joinInput, setJoinInput]           = useState('')
-  const [status, setStatus]                 = useState('')
-  const [viewers, setViewers]               = useState(0)
-  const [playing, setPlaying]               = useState(false)
-  const [isScreen, setIsScreen]             = useState(false)
-  const [hasVideo, setHasVideo]             = useState(false)
-  const [copied, setCopied]                 = useState(false)
-  const [urlInput, setUrlInput]             = useState('')
-  const [transferProgress, setTransferProgress] = useState(0)
-  const [transferring, setTransferring]     = useState(false)
-  const [chatOpen, setChatOpen]             = useState(false)
-  const [messages, setMessages]             = useState([])
-  const [chatInput, setChatInput]           = useState('')
-  const [unread, setUnread]                 = useState(0)
-  const [isFullscreen, setIsFullscreen]     = useState(false)
+export default function App() {
+  const videoRef  = useRef(null)
+  const peerRef   = useRef(null)
+  const connsRef  = useRef({})   // peerId -> JSON conn
+  const streamRef = useRef(null)
+  const callsRef  = useRef([])
+  const chunksRef = useRef([])
+  const isSyncRef = useRef(false)
   const chatEndRef = useRef(null)
 
+  const [mode, setMode]               = useState(null)
+  const [roomId, setRoomId]           = useState('')
+  const [joinInput, setJoinInput]     = useState('')
+  const [status, setStatus]           = useState('')
+  const [viewers, setViewers]         = useState(0)
+  const [playing, setPlaying]         = useState(false)
+  const [isScreen, setIsScreen]       = useState(false)
+  const [hasVideo, setHasVideo]       = useState(false)
+  const [copied, setCopied]           = useState(false)
+  const [urlInput, setUrlInput]       = useState('')
+  const [progress, setProgress]       = useState(0)
+  const [transferring, setTransferring] = useState(false)
+  const [chatOpen, setChatOpen]       = useState(false)
+  const [messages, setMessages]       = useState([])
+  const [chatInput, setChatInput]     = useState('')
+  const [unread, setUnread]           = useState(0)
+
+  // ── HELPERS ───────────────────────────────────────
   function broadcast(msg, excludePeer) {
     Object.entries(connsRef.current).forEach(([pid, c]) => {
       if (pid !== excludePeer && c.open) c.send(msg)
     })
+  }
+
+  function syncVideo(v) {
+    broadcast({ t: 'seek', time: v.currentTime })
+    broadcast({ t: v.paused ? 'pause' : 'play', time: v.currentTime })
   }
 
   // ── HOST ──────────────────────────────────────────
@@ -76,18 +85,16 @@ export default function App() {
     })
 
     peer.on('connection', conn => {
+      // binary connection = file transfer, handle separately
+      if (conn.serialization === 'binary' || conn.label === 'file') return
+
       conn.on('open', () => {
-        // ignore binary file transfer connections
-        if (conn.serialization === 'binary' || conn.label === 'file') return
         connsRef.current[conn.peer] = conn
-        const count = Object.keys(connsRef.current).length
-        setViewers(count)
-        setStatus(`👥 ${count} viewer(s) connected`)
+        setViewers(Object.keys(connsRef.current).length)
+        setStatus(`👥 ${Object.keys(connsRef.current).length} viewer(s) connected`)
+
         const v = videoRef.current
-        if (v && v.src && !isScreen) {
-          conn.send({ t: 'seek', time: v.currentTime })
-          conn.send({ t: v.paused ? 'pause' : 'play' })
-        }
+        if (v && v.src && !isScreen) syncVideo(v)
         if (streamRef.current) {
           const call = peer.call(conn.peer, streamRef.current)
           callsRef.current.push(call)
@@ -102,27 +109,38 @@ export default function App() {
 
     peer.on('error', e => setStatus('❌ ' + e.type))
     peer.on('disconnected', () => {
-      setStatus('⚠️ Network issue — reconnecting...')
+      setStatus('⚠️ Reconnecting...')
       setTimeout(() => peer.reconnect(), 1000)
     })
   }
 
   async function sendFileTo(conn, file) {
     const totalChunks = Math.ceil(file.size / CHUNK)
-    // open a separate binary connection for raw fast transfer
-    const binConn = peerRef.current.connect(conn.peer, { reliable: true, serialization: 'binary', label: 'file' })
-    await new Promise(resolve => binConn.on('open', resolve))
+
+    // open dedicated binary connection
+    const binConn = peerRef.current.connect(conn.peer, {
+      reliable: true, serialization: 'binary', label: 'file'
+    })
+    await new Promise((res, rej) => {
+      binConn.on('open', res)
+      setTimeout(rej, 10000)
+    })
+
     binConn.send({ t: 'file-start', name: file.name, size: file.size, total: totalChunks })
+
     for (let i = 0; i < totalChunks; i++) {
       const buf = await file.slice(i * CHUNK, (i + 1) * CHUNK).arrayBuffer()
       binConn.send(buf)
       const pct = Math.round(((i + 1) / totalChunks) * 100)
-      setTransferProgress(pct)
-      if (i % 20 === 0) setStatus(`📤 Sending: ${pct}%`)
-      if (i % 20 === 0) await new Promise(r => setTimeout(r, 0))
+      setProgress(pct)
+      if (i % 10 === 0) {
+        setStatus(`📤 Sending: ${pct}%`)
+        await new Promise(r => setTimeout(r, 0)) // keep UI responsive
+      }
     }
+
     binConn.send({ t: 'file-end' })
-    setTimeout(() => binConn.close(), 1000)
+    setTimeout(() => binConn.close(), 2000)
   }
 
   async function handleFile(e) {
@@ -140,9 +158,12 @@ export default function App() {
     const conns = Object.values(connsRef.current).filter(c => c.open)
     if (conns.length > 0) {
       setTransferring(true)
-      for (const conn of conns) await sendFileTo(conn, file)
+      for (const conn of conns) {
+        try { await sendFileTo(conn, file) }
+        catch { setStatus('❌ File send failed') }
+      }
       setTransferring(false)
-      setTransferProgress(0)
+      setProgress(0)
       setStatus('✅ Video sent to all viewers')
     }
     peerRef.current._videoFile = file
@@ -230,8 +251,13 @@ export default function App() {
       const timeout = setTimeout(() => {
         if (!conn.open) {
           try { conn.close() } catch {}
-          if (retries < maxRetries) { retries++; setStatus(`🔄 Retrying... (${retries}/${maxRetries})`); setTimeout(tryConnect, 1000) }
-          else setStatus('❌ Could not connect — check Room ID')
+          if (retries < maxRetries) {
+            retries++
+            setStatus(`🔄 Retrying... (${retries}/${maxRetries})`)
+            setTimeout(tryConnect, 1000)
+          } else {
+            setStatus('❌ Could not connect — check Room ID')
+          }
         }
       }, 15000)
 
@@ -248,47 +274,47 @@ export default function App() {
       })
       conn.on('error', () => {
         clearTimeout(timeout)
-        if (retries < maxRetries) { retries++; setStatus(`🔄 Retrying... (${retries}/${maxRetries})`); setTimeout(tryConnect, 1000) }
-        else setStatus('❌ Connection failed')
+        if (retries < maxRetries) {
+          retries++
+          setStatus(`🔄 Retrying... (${retries}/${maxRetries})`)
+          setTimeout(tryConnect, 1000)
+        } else setStatus('❌ Connection failed')
       })
     }
 
     peer.on('open', () => { setStatus('🔄 Reaching host...'); tryConnect() })
 
-    // handle incoming binary file transfer connection from host
+    // incoming binary file transfer from host
     peer.on('connection', inConn => {
-      if (inConn.serialization === 'binary' || inConn.label === 'file') {
-        let fileTotal = 0
-        let fileReceived = 0
-        inConn.on('data', data => {
-          if (data && typeof data === 'object' && !ArrayBuffer.isView(data) && !(data instanceof ArrayBuffer) && data.t === 'file-start') {
-            chunksRef.current = []
-            fileTotal = data.total
-            fileReceived = 0
-            setTransferring(true)
-            setTransferProgress(0)
-            setStatus(`📥 Receiving: ${data.name} (${(data.size / 1024 / 1024).toFixed(1)} MB)`)
-          } else if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
-            const buf = data instanceof ArrayBuffer ? data : data.buffer
-            chunksRef.current.push(buf)
-            fileReceived++
-            const pct = Math.round((fileReceived / fileTotal) * 100)
-            setTransferProgress(pct)
-            if (fileReceived % 10 === 0) setStatus(`📥 Receiving: ${pct}%`)
-          } else if (data && typeof data === 'object' && data.t === 'file-end') {
-            const blob = new Blob(chunksRef.current)
-            const url = URL.createObjectURL(blob)
-            const v = videoRef.current
-            v.srcObject = null; v.src = url; v.load()
-            setHasVideo(true); setIsScreen(false)
-            setTransferring(false); setTransferProgress(0)
-            setStatus('✅ Video ready — waiting for host to play')
-            chunksRef.current = []
-          }
-        })
-        return
-      }
-      // normal JSON control connection (shouldn't happen on viewer but handle gracefully)
+      if (inConn.serialization !== 'binary' && inConn.label !== 'file') return
+      let fileTotal = 0
+      let fileReceived = 0
+      inConn.on('data', data => {
+        if (isFileMeta(data) && data.t === 'file-start') {
+          chunksRef.current = []
+          fileTotal = data.total
+          fileReceived = 0
+          setTransferring(true)
+          setProgress(0)
+          setStatus(`📥 Receiving: ${data.name} (${(data.size / 1024 / 1024).toFixed(1)} MB)`)
+        } else if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+          const buf = data instanceof ArrayBuffer ? data : data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
+          chunksRef.current.push(buf)
+          fileReceived++
+          const pct = Math.round((fileReceived / fileTotal) * 100)
+          setProgress(pct)
+          if (fileReceived % 10 === 0) setStatus(`📥 Receiving: ${pct}%`)
+        } else if (isFileMeta(data) && data.t === 'file-end') {
+          const blob = new Blob(chunksRef.current)
+          const url = URL.createObjectURL(blob)
+          const v = videoRef.current
+          v.srcObject = null; v.src = url; v.load()
+          setHasVideo(true); setIsScreen(false)
+          setTransferring(false); setProgress(0)
+          setStatus('✅ Video ready — waiting for host to play')
+          chunksRef.current = []
+        }
+      })
     })
 
     peer.on('call', call => {
@@ -296,7 +322,8 @@ export default function App() {
       call.on('stream', remote => {
         const v = videoRef.current
         v.srcObject = remote; v.muted = false; v.volume = 1
-        v.play().then(() => { setPlaying(true); setHasVideo(true); setIsScreen(true); setStatus('🟢 Watching live screen') })
+        v.play()
+          .then(() => { setPlaying(true); setHasVideo(true); setIsScreen(true); setStatus('🟢 Watching live screen') })
           .catch(() => setStatus('Click ▶ Play'))
       })
       call.on('close', () => { setIsScreen(false); setHasVideo(false); setStatus('Screen share ended') })
@@ -309,16 +336,14 @@ export default function App() {
     })
   }
 
-  // ── DATA HANDLER ──────────────────────────────────
+  // ── SHARED DATA HANDLER ───────────────────────────
   function handleData(msg, fromPeer) {
     const v = videoRef.current
 
-    if (msg.t === 'file-start') {}
-    if (msg.t === 'file-chunk') {}
-    if (msg.t === 'file-end') {}
-
-    if (msg.t === 'src') { v.srcObject = null; v.src = msg.src; v.load(); setHasVideo(true); setIsScreen(false) }
-
+    if (msg.t === 'src') {
+      v.srcObject = null; v.src = msg.src; v.load()
+      setHasVideo(true); setIsScreen(false)
+    }
     if (msg.t === 'play') {
       isSyncRef.current = true
       if (msg.time !== undefined) v.currentTime = msg.time
@@ -336,7 +361,6 @@ export default function App() {
       v.currentTime = msg.time
       setTimeout(() => { isSyncRef.current = false }, 500)
     }
-
     if (msg.t === 'chat') {
       setMessages(prev => [...prev, { from: msg.from, text: msg.text, time: msg.time }])
       setUnread(u => u + 1)
@@ -370,9 +394,8 @@ export default function App() {
   }, [messages, chatOpen])
 
   useEffect(() => {
-    const onChange = () => setIsFullscreen(!!document.fullscreenElement)
-    document.addEventListener('fullscreenchange', onChange)
-    return () => document.removeEventListener('fullscreenchange', onChange)
+    const room = new URLSearchParams(window.location.search).get('room')
+    if (room) setJoinInput(room)
   }, [])
 
   function toggleFullscreen() {
@@ -385,11 +408,6 @@ export default function App() {
     navigator.clipboard.writeText(`${window.location.origin}?room=${roomId}`)
     setCopied(true); setTimeout(() => setCopied(false), 2000)
   }
-
-  useEffect(() => {
-    const room = new URLSearchParams(window.location.search).get('room')
-    if (room) setJoinInput(room)
-  }, [])
 
   return (
     <div className="player-wrapper">
@@ -426,8 +444,8 @@ export default function App() {
 
       {transferring && (
         <div className="progress-bar">
-          <div className="progress-fill" style={{ width: transferProgress + '%' }} />
-          <span>{transferProgress}%</span>
+          <div className="progress-fill" style={{ width: progress + '%' }} />
+          <span>{progress}%</span>
         </div>
       )}
 
@@ -478,7 +496,9 @@ export default function App() {
       {hasVideo && (
         <div className="controls">
           {mode === 'host' && !isScreen && (
-            playing ? <button onClick={hostPause}>⏸ Pause</button> : <button onClick={hostPlay}>▶ Play</button>
+            playing
+              ? <button onClick={hostPause}>⏸ Pause</button>
+              : <button onClick={hostPlay}>▶ Play</button>
           )}
           {mode === 'viewer' && (
             <button onClick={viewerTogglePlay}>{playing ? '⏸ Pause' : '▶ Play'}</button>
