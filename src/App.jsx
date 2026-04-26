@@ -17,9 +17,9 @@ const ICE = {
   rtcpMuxPolicy: 'require',
 }
 
-const CHUNK = 512 * 1024  // 512KB per chunk
-const BATCH = 16           // 16 chunks at once = 8MB per batch
-const MAX_BUFFERED = 8 * 1024 * 1024 // pause if buffer > 8MB
+const CHUNK = 64 * 1024   // 64KB — reliable for all networks
+const BATCH = 4            // 4 chunks at a time
+const MAX_BUFFERED = 1 * 1024 * 1024 // pause if buffer > 1MB
 
 
 
@@ -125,10 +125,25 @@ export default function App() {
       try {
         const dc = conn.dataChannel || conn._dc
         if (!dc || dc.bufferedAmount < MAX_BUFFERED) return resolve()
-        const check = () => dc.bufferedAmount < MAX_BUFFERED ? resolve() : setTimeout(check, 10)
-        setTimeout(check, 10)
+        const check = () => dc.bufferedAmount < MAX_BUFFERED ? resolve() : setTimeout(check, 50)
+        setTimeout(check, 50)
       } catch { resolve() }
     })
+  }
+
+  async function sendFileTo(conn, file) {
+    const totalChunks = Math.ceil(file.size / CHUNK)
+    conn.send({ t: 'file-start', name: file.name, size: file.size, total: totalChunks })
+    for (let i = 0; i < totalChunks; i++) {
+      // wait for buffer to drain before sending next chunk
+      await waitForBuffer(conn)
+      // read chunk from disk
+      const buf = await file.slice(i * CHUNK, (i + 1) * CHUNK).arrayBuffer()
+      conn.send({ t: 'file-chunk', index: i, data: buf })
+      const pct = Math.round(((i + 1) / totalChunks) * 100)
+      if (pct % 5 === 0 || i === totalChunks - 1) setTransferProgress(pct)
+    }
+    conn.send({ t: 'file-end' })
   }
 
   async function sendFileTo(conn, file) {
@@ -161,21 +176,10 @@ export default function App() {
     if (conns.length > 0) {
       setTransferring(true)
       setStatus(`📤 Sending to ${conns.length} viewer(s)...`)
-      // pre-read entire file into memory once
-      const fullBuf = await file.arrayBuffer()
-      const totalChunks = Math.ceil(fullBuf.byteLength / CHUNK)
-
-      await Promise.all(conns.map(async conn => {
-        conn.send({ t: 'file-start', name: file.name, size: file.size, total: totalChunks })
-        for (let i = 0; i < totalChunks; i += BATCH) {
-          await waitForBuffer(conn)
-          for (let j = i; j < Math.min(i + BATCH, totalChunks); j++) {
-            conn.send({ t: 'file-chunk', index: j, data: fullBuf.slice(j * CHUNK, (j + 1) * CHUNK) })
-          }
-          setTransferProgress(Math.round((Math.min(i + BATCH, totalChunks) / totalChunks) * 100))
-        }
-        conn.send({ t: 'file-end' })
-      }))
+      // send to all viewers sequentially per viewer
+      for (const conn of conns) {
+        await sendFileTo(conn, file)
+      }
       setTransferring(false)
       setTransferProgress(0)
       setStatus(`✅ Video sent to all viewers`)
@@ -376,24 +380,28 @@ export default function App() {
 
     // file transfer
     if (msg.t === 'file-start') {
-      chunksRef.current = []
+      chunksRef.current = new Array(msg.total)
       setTransferring(true)
       setTransferProgress(0)
-      setStatus(`📥 Receiving video: ${msg.name}...`)
       peerRef.current._fileTotal = msg.total
+      peerRef.current._fileReceived = 0
       peerRef.current._fileName = msg.name
+      setStatus(`📥 Receiving: ${msg.name} (${(msg.size / 1024 / 1024).toFixed(1)} MB)`)
     }
     if (msg.t === 'file-chunk') {
       chunksRef.current[msg.index] = msg.data
-      // throttle UI updates — only re-render every 2%
-      const received = chunksRef.current.filter(Boolean).length
-      const pct = Math.round((received / peerRef.current._fileTotal) * 100)
-      if (pct % 2 === 0) {
-        setTransferProgress(pct)
-        setStatus(`📥 Receiving: ${pct}%`)
-      }
+      peerRef.current._fileReceived = (peerRef.current._fileReceived || 0) + 1
+      const pct = Math.round((peerRef.current._fileReceived / peerRef.current._fileTotal) * 100)
+      setTransferProgress(pct)
+      if (pct % 5 === 0) setStatus(`📥 Receiving: ${pct}%`)
     }
     if (msg.t === 'file-end') {
+      const total = peerRef.current._fileTotal
+      const received = chunksRef.current.filter(c => c !== undefined).length
+      if (received < total) {
+        setStatus(`⚠️ Only got ${received}/${total} chunks — transfer incomplete`)
+        return
+      }
       const blob = new Blob(chunksRef.current)
       const url = URL.createObjectURL(blob)
       v.srcObject = null
@@ -402,7 +410,8 @@ export default function App() {
       setHasVideo(true)
       setIsScreen(false)
       setTransferring(false)
-      setTransferProgress(0)
+      setTransferProgress(100)
+      setTimeout(() => setTransferProgress(0), 500)
       setStatus(`✅ Video ready — waiting for host to play`)
       chunksRef.current = []
     }
