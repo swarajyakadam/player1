@@ -2,15 +2,26 @@ import { useRef, useState, useEffect } from 'react'
 import Peer from 'peerjs'
 import './App.css'
 
+// Works on all Indian carriers: Jio, Airtel, Vi, BSNL
+// - Jio/BSNL: can do direct P2P or UDP TURN
+// - Airtel/Vi: symmetric NAT, needs TCP:443 TURN
+// Strategy: include both UDP and TCP TURN, let ICE pick the best path per network
 const ICE = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    // Metered — TCP:443 (Airtel/Vi) + UDP (Jio/BSNL)
+    { urls: 'turn:a.relay.metered.ca:443?transport=tcp', username: 'e8dd65f0519bf624f0c4f702', credential: 'uBpJMGGnu9WWWWWW' },
+    { urls: 'turns:a.relay.metered.ca:443',              username: 'e8dd65f0519bf624f0c4f702', credential: 'uBpJMGGnu9WWWWWW' },
+    { urls: 'turn:a.relay.metered.ca:80?transport=tcp',  username: 'e8dd65f0519bf624f0c4f702', credential: 'uBpJMGGnu9WWWWWW' },
+    { urls: 'turn:a.relay.metered.ca:80',                username: 'e8dd65f0519bf624f0c4f702', credential: 'uBpJMGGnu9WWWWWW' },
+    // openrelay fallback — TCP:443 + UDP
     { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
-    { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
-    { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turns:openrelay.metered.ca:443',              username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:80',                username: 'openrelayproject', credential: 'openrelayproject' },
   ],
-  iceCandidatePoolSize: 4,
-  iceTransportPolicy: 'all',
+  iceCandidatePoolSize: 10,
+  iceTransportPolicy: 'all', // 'all' = try direct first (fast for Jio/BSNL), fall back to TURN (Airtel/Vi)
   bundlePolicy: 'max-bundle',
   rtcpMuxPolicy: 'require',
 }
@@ -23,12 +34,9 @@ const MAX_BUFFERED = 4 * 1024 * 1024 // pause sending if buffer > 4 MB
 
 function makePeer(id) {
   return new Peer(id || undefined, {
-    config: {
-      ...ICE,
-      sdpSemantics: 'unified-plan',
-    },
+    config: ICE,
     debug: 0,
-    pingInterval: 8000,
+    pingInterval: 4000,
     trickle: true,
   })
 }
@@ -269,28 +277,35 @@ export default function App() {
     setStatus('🔄 Connecting...')
 
     let retries = 0
-    const maxRetries = 3
+    const maxRetries = 8
+    // 20s timeout — Airtel/Vi symmetric NAT + TCP TURN can take 15s; Jio/BSNL connect in <5s
+    const CONNECT_TIMEOUT = 20000
 
     function tryConnect() {
+      // destroy old conn attempt cleanly
+      if (connsRef.current['host']) {
+        try { connsRef.current['host'].close() } catch {}
+        delete connsRef.current['host']
+      }
+
       const conn = peer.connect(id, {
         reliable: true,
         serialization: 'binary',
         config: ICE,
       })
 
-      // timeout if not connected in 5s
       const timeout = setTimeout(() => {
         if (!conn.open) {
-          conn.close()
+          try { conn.close() } catch {}
           if (retries < maxRetries) {
             retries++
             setStatus(`🔄 Retrying... (${retries}/${maxRetries})`)
-            tryConnect()
+            setTimeout(tryConnect, 800)
           } else {
-            setStatus('❌ Could not connect. Check Room ID or ask host to recreate room.')
+            setStatus('❌ Could not connect — check Room ID or ask host to recreate room')
           }
         }
-      }, 5000)
+      }, CONNECT_TIMEOUT)
 
       conn.on('open', () => {
         clearTimeout(timeout)
@@ -300,20 +315,21 @@ export default function App() {
       })
       conn.on('data', msg => handleData(msg, null))
       conn.on('close', () => {
+        delete connsRef.current['host']
         setStatus('⚠️ Disconnected — reconnecting...')
         setTimeout(() => {
           if (peer.disconnected) peer.reconnect()
           else tryConnect()
-        }, 1000)
+        }, 1500)
       })
       conn.on('error', () => {
         clearTimeout(timeout)
         if (retries < maxRetries) {
           retries++
           setStatus(`🔄 Retrying... (${retries}/${maxRetries})`)
-          setTimeout(tryConnect, 1000)
+          setTimeout(tryConnect, 800)
         } else {
-          setStatus('❌ Connection failed. Check Room ID.')
+          setStatus('❌ Connection failed — check Room ID')
         }
       })
     }
