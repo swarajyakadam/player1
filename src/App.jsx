@@ -5,24 +5,31 @@ import './App.css'
 const ICE = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
-    { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
     { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
   ],
-  iceCandidatePoolSize: 10,
+  iceCandidatePoolSize: 4,
   iceTransportPolicy: 'all',
   bundlePolicy: 'max-bundle',
   rtcpMuxPolicy: 'require',
 }
 
+const CHUNK = 256 * 1024 // 256 KB — bigger chunks = fewer round trips on 4G
+const BATCH = 8           // send 8 chunks at once before yielding
+const MAX_BUFFERED = 4 * 1024 * 1024 // pause sending if buffer > 4 MB
+
 
 
 function makePeer(id) {
   return new Peer(id || undefined, {
-    config: ICE,
+    config: {
+      ...ICE,
+      sdpSemantics: 'unified-plan',
+    },
     debug: 0,
-    pingInterval: 3000,
+    pingInterval: 8000,
+    trickle: true,
   })
 }
 
@@ -102,30 +109,32 @@ export default function App() {
 
     peer.on('disconnected', () => {
       setStatus('⚠️ Network issue — reconnecting...')
-      setTimeout(() => peer.reconnect(), 2000)
+      setTimeout(() => peer.reconnect(), 1000)
     })
   }
 
-  // send file to a single connection in chunks
+  // wait until DataChannel buffer drains below MAX_BUFFERED
+  function waitForBuffer(conn) {
+    return new Promise(resolve => {
+      const dc = conn.dataChannel
+      if (!dc || dc.bufferedAmount < MAX_BUFFERED) return resolve()
+      const check = () => {
+        if (dc.bufferedAmount < MAX_BUFFERED) resolve()
+        else setTimeout(check, 20)
+      }
+      setTimeout(check, 20)
+    })
+  }
+
   async function sendFileTo(conn, file) {
     const totalChunks = Math.ceil(file.size / CHUNK)
     conn.send({ t: 'file-start', name: file.name, size: file.size, total: totalChunks })
-
-    // send in parallel batches of 4 chunks for max speed
-    const BATCH = 4
     for (let i = 0; i < totalChunks; i += BATCH) {
-      const batch = []
+      await waitForBuffer(conn)
       for (let j = i; j < Math.min(i + BATCH, totalChunks); j++) {
-        const slice = file.slice(j * CHUNK, (j + 1) * CHUNK)
-        batch.push(slice.arrayBuffer().then(buf => ({ index: j, buf })))
+        conn.send({ t: 'file-chunk', index: j, data: file.slice(j * CHUNK, (j + 1) * CHUNK).arrayBuffer() })
       }
-      const results = await Promise.all(batch)
-      results.forEach(({ index, buf }) => {
-        conn.send({ t: 'file-chunk', index, data: buf })
-      })
       setTransferProgress(Math.round((Math.min(i + BATCH, totalChunks) / totalChunks) * 100))
-      // tiny yield to keep UI responsive, no artificial delay
-      await new Promise(r => setTimeout(r, 0))
     }
     conn.send({ t: 'file-end' })
   }
@@ -147,23 +156,19 @@ export default function App() {
     if (conns.length > 0) {
       setTransferring(true)
       setStatus(`📤 Sending to ${conns.length} viewer(s)...`)
-      // pre-read entire file into ArrayBuffer once, then send to all
-      const fullBuf = await file.arrayBuffer()
-      const totalChunks = Math.ceil(fullBuf.byteLength / CHUNK)
-
+      const totalChunks = Math.ceil(file.size / CHUNK)
       await Promise.all(conns.map(async conn => {
         conn.send({ t: 'file-start', name: file.name, size: file.size, total: totalChunks })
-        const BATCH = 4
         for (let i = 0; i < totalChunks; i += BATCH) {
+          await waitForBuffer(conn)
           for (let j = i; j < Math.min(i + BATCH, totalChunks); j++) {
-            conn.send({ t: 'file-chunk', index: j, data: fullBuf.slice(j * CHUNK, (j + 1) * CHUNK) })
+            const buf = await file.slice(j * CHUNK, (j + 1) * CHUNK).arrayBuffer()
+            conn.send({ t: 'file-chunk', index: j, data: buf })
           }
           setTransferProgress(Math.round((Math.min(i + BATCH, totalChunks) / totalChunks) * 100))
-          await new Promise(r => setTimeout(r, 0))
         }
         conn.send({ t: 'file-end' })
       }))
-
       setTransferring(false)
       setTransferProgress(0)
       setStatus(`✅ Video sent to all viewers`)
@@ -206,8 +211,8 @@ export default function App() {
   async function startScreen() {
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: { ideal: 30 }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-        audio: { echoCancellation: false, noiseSuppression: false, sampleRate: 48000 }
+        video: { frameRate: { ideal: 24, max: 30 }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: { echoCancellation: false, noiseSuppression: false, sampleRate: 44100 }
       })
       streamRef.current = stream
       const v = videoRef.current
@@ -220,6 +225,16 @@ export default function App() {
 
       Object.keys(connsRef.current).forEach(pid => {
         const call = peerRef.current.call(pid, stream)
+        // cap bitrate to 1.5 Mbps for smooth 4G screen share
+        call.peerConnection?.getSenders().forEach(sender => {
+          if (sender.track?.kind === 'video') {
+            const params = sender.getParameters()
+            if (!params.encodings) params.encodings = [{}]
+            params.encodings[0].maxBitrate = 1_500_000
+            params.encodings[0].maxFramerate = 24
+            sender.setParameters(params).catch(() => {})
+          }
+        })
         callsRef.current.push(call)
       })
 
@@ -260,9 +275,10 @@ export default function App() {
       const conn = peer.connect(id, {
         reliable: true,
         serialization: 'binary',
+        config: ICE,
       })
 
-      // timeout if not connected in 8s
+      // timeout if not connected in 5s
       const timeout = setTimeout(() => {
         if (!conn.open) {
           conn.close()
@@ -274,7 +290,7 @@ export default function App() {
             setStatus('❌ Could not connect. Check Room ID or ask host to recreate room.')
           }
         }
-      }, 8000)
+      }, 5000)
 
       conn.on('open', () => {
         clearTimeout(timeout)
@@ -288,14 +304,14 @@ export default function App() {
         setTimeout(() => {
           if (peer.disconnected) peer.reconnect()
           else tryConnect()
-        }, 2000)
+        }, 1000)
       })
       conn.on('error', () => {
         clearTimeout(timeout)
         if (retries < maxRetries) {
           retries++
           setStatus(`🔄 Retrying... (${retries}/${maxRetries})`)
-          setTimeout(tryConnect, 2000)
+          setTimeout(tryConnect, 1000)
         } else {
           setStatus('❌ Connection failed. Check Room ID.')
         }
@@ -326,13 +342,13 @@ export default function App() {
 
     peer.on('disconnected', () => {
       setStatus('⚠️ Network issue — reconnecting...')
-      setTimeout(() => peer.reconnect(), 2000)
+      setTimeout(() => peer.reconnect(), 1000)
     })
 
     peer.on('error', e => {
       if (e.type === 'network' || e.type === 'disconnected') {
         setStatus('⚠️ Network issue — retrying...')
-        setTimeout(() => peer.reconnect(), 2000)
+        setTimeout(() => peer.reconnect(), 1000)
       } else {
         setStatus('❌ ' + e.type + ' — wrong Room ID?')
       }
@@ -354,10 +370,13 @@ export default function App() {
     }
     if (msg.t === 'file-chunk') {
       chunksRef.current[msg.index] = msg.data
+      // throttle UI updates — only re-render every 2%
       const received = chunksRef.current.filter(Boolean).length
       const pct = Math.round((received / peerRef.current._fileTotal) * 100)
-      setTransferProgress(pct)
-      setStatus(`📥 Receiving: ${pct}%`)
+      if (pct % 2 === 0) {
+        setTransferProgress(pct)
+        setStatus(`📥 Receiving: ${pct}%`)
+      }
     }
     if (msg.t === 'file-end') {
       const blob = new Blob(chunksRef.current)
