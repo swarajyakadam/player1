@@ -17,7 +17,7 @@ const ICE = {
   rtcpMuxPolicy: 'require',
 }
 
-const CHUNK = 64 * 1024   // 64KB — reliable for all networks
+const CHUNK = 32 * 1024   // 32KB — base64 encoded = ~43KB per message, safe for all networks
 const BATCH = 4            // 4 chunks at a time
 const MAX_BUFFERED = 1 * 1024 * 1024 // pause if buffer > 1MB
 
@@ -135,13 +135,14 @@ export default function App() {
     const totalChunks = Math.ceil(file.size / CHUNK)
     conn.send({ t: 'file-start', name: file.name, size: file.size, total: totalChunks })
     for (let i = 0; i < totalChunks; i++) {
-      // wait for buffer to drain before sending next chunk
       await waitForBuffer(conn)
-      // read chunk from disk
       const buf = await file.slice(i * CHUNK, (i + 1) * CHUNK).arrayBuffer()
-      conn.send({ t: 'file-chunk', index: i, data: buf })
+      // convert to base64 so PeerJS JSON serialization handles it correctly
+      const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)))
+      conn.send({ t: 'file-chunk', index: i, data: b64 })
       const pct = Math.round(((i + 1) / totalChunks) * 100)
       if (pct % 5 === 0 || i === totalChunks - 1) setTransferProgress(pct)
+      setStatus(`📤 Sending: ${pct}%`)
     }
     conn.send({ t: 'file-end' })
   }
@@ -293,8 +294,6 @@ export default function App() {
 
       const conn = peer.connect(id, {
         reliable: true,
-        serialization: 'binary',
-        config: ICE,
       })
 
       const timeout = setTimeout(() => {
@@ -389,7 +388,11 @@ export default function App() {
       setStatus(`📥 Receiving: ${msg.name} (${(msg.size / 1024 / 1024).toFixed(1)} MB)`)
     }
     if (msg.t === 'file-chunk') {
-      chunksRef.current[msg.index] = msg.data
+      // convert base64 back to ArrayBuffer
+      const binary = atob(msg.data)
+      const bytes = new Uint8Array(binary.length)
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+      chunksRef.current[msg.index] = bytes.buffer
       peerRef.current._fileReceived = (peerRef.current._fileReceived || 0) + 1
       const pct = Math.round((peerRef.current._fileReceived / peerRef.current._fileTotal) * 100)
       setTransferProgress(pct)
