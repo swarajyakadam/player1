@@ -2,14 +2,13 @@ import { useRef, useState, useEffect } from 'react'
 import Peer from 'peerjs'
 import './App.css'
 
-// Metered.ca verified TURN — works on Jio, Airtel, Vi, BSNL (4G/5G)
 const ICE = {
   iceServers: [
     { urls: 'stun:stun.relay.metered.ca:80' },
-    { urls: 'turn:global.relay.metered.ca:80',                  username: 'ce4d79c0ea31a9556ff1e39f', credential: 's4EIp+6Gsbr6IrEw' },
-    { urls: 'turn:global.relay.metered.ca:80?transport=tcp',    username: 'ce4d79c0ea31a9556ff1e39f', credential: 's4EIp+6Gsbr6IrEw' },
-    { urls: 'turn:global.relay.metered.ca:443',                 username: 'ce4d79c0ea31a9556ff1e39f', credential: 's4EIp+6Gsbr6IrEw' },
-    { urls: 'turns:global.relay.metered.ca:443?transport=tcp',  username: 'ce4d79c0ea31a9556ff1e39f', credential: 's4EIp+6Gsbr6IrEw' },
+    { urls: 'turn:global.relay.metered.ca:80',                 username: 'ce4d79c0ea31a9556ff1e39f', credential: 's4EIp+6Gsbr6IrEw' },
+    { urls: 'turn:global.relay.metered.ca:80?transport=tcp',   username: 'ce4d79c0ea31a9556ff1e39f', credential: 's4EIp+6Gsbr6IrEw' },
+    { urls: 'turn:global.relay.metered.ca:443',                username: 'ce4d79c0ea31a9556ff1e39f', credential: 's4EIp+6Gsbr6IrEw' },
+    { urls: 'turns:global.relay.metered.ca:443?transport=tcp', username: 'ce4d79c0ea31a9556ff1e39f', credential: 's4EIp+6Gsbr6IrEw' },
   ],
   iceCandidatePoolSize: 10,
   iceTransportPolicy: 'all',
@@ -17,57 +16,47 @@ const ICE = {
   rtcpMuxPolicy: 'require',
 }
 
-const CHUNK = 32 * 1024   // 32KB — base64 encoded = ~43KB per message, safe for all networks
-const BATCH = 4            // 4 chunks at a time
-const MAX_BUFFERED = 1 * 1024 * 1024 // pause if buffer > 1MB
-
-
+const CHUNK = 256 * 1024 // 256KB raw binary chunks
 
 const PEER_SERVER = import.meta.env.VITE_PEER_SERVER || '0.peerjs.com'
-const PEER_PORT = import.meta.env.VITE_PEER_PORT ? parseInt(import.meta.env.VITE_PEER_PORT) : 443
-const PEER_PATH = import.meta.env.VITE_PEER_PATH || '/'
+const PEER_PORT   = import.meta.env.VITE_PEER_PORT ? parseInt(import.meta.env.VITE_PEER_PORT) : 443
+const PEER_PATH   = import.meta.env.VITE_PEER_PATH || '/'
 
 function makePeer(id) {
   return new Peer(id || undefined, {
-    host: PEER_SERVER,
-    port: PEER_PORT,
-    path: PEER_PATH,
-    secure: true,
-    config: ICE,
-    debug: 0,
-    pingInterval: 2000,
+    host: PEER_SERVER, port: PEER_PORT, path: PEER_PATH, secure: true,
+    config: ICE, debug: 0, pingInterval: 2000,
   })
 }
 
 export default function App() {
-  const videoRef = useRef(null)
-  const peerRef = useRef(null)
-  const connsRef = useRef({})
-  const streamRef = useRef(null)
-  const callsRef = useRef([])
-  const chunksRef = useRef([])
-  const isSyncRef = useRef(false)
+  const videoRef    = useRef(null)
+  const peerRef     = useRef(null)
+  const connsRef    = useRef({})
+  const streamRef   = useRef(null)
+  const callsRef    = useRef([])
+  const chunksRef   = useRef([])
+  const isSyncRef   = useRef(false)
 
-  const [mode, setMode] = useState(null)
-  const [roomId, setRoomId] = useState('')
-  const [joinInput, setJoinInput] = useState('')
-  const [status, setStatus] = useState('')
-  const [viewers, setViewers] = useState(0)
-  const [playing, setPlaying] = useState(false)
-  const [isScreen, setIsScreen] = useState(false)
-  const [hasVideo, setHasVideo] = useState(false)
-  const [copied, setCopied] = useState(false)
-  const [urlInput, setUrlInput] = useState('')
+  const [mode, setMode]                     = useState(null)
+  const [roomId, setRoomId]                 = useState('')
+  const [joinInput, setJoinInput]           = useState('')
+  const [status, setStatus]                 = useState('')
+  const [viewers, setViewers]               = useState(0)
+  const [playing, setPlaying]               = useState(false)
+  const [isScreen, setIsScreen]             = useState(false)
+  const [hasVideo, setHasVideo]             = useState(false)
+  const [copied, setCopied]                 = useState(false)
+  const [urlInput, setUrlInput]             = useState('')
   const [transferProgress, setTransferProgress] = useState(0)
-  const [transferring, setTransferring] = useState(false)
-  const [chatOpen, setChatOpen] = useState(false)
-  const [messages, setMessages] = useState([])
-  const [chatInput, setChatInput] = useState('')
-  const [unread, setUnread] = useState(0)
+  const [transferring, setTransferring]     = useState(false)
+  const [chatOpen, setChatOpen]             = useState(false)
+  const [messages, setMessages]             = useState([])
+  const [chatInput, setChatInput]           = useState('')
+  const [unread, setUnread]                 = useState(0)
+  const [isFullscreen, setIsFullscreen]     = useState(false)
   const chatEndRef = useRef(null)
-  const [isFullscreen, setIsFullscreen] = useState(false)
 
-  // ── BROADCAST ─────────────────────────────────────
   function broadcast(msg, excludePeer) {
     Object.entries(connsRef.current).forEach(([pid, c]) => {
       if (pid !== excludePeer && c.open) c.send(msg)
@@ -88,12 +77,12 @@ export default function App() {
 
     peer.on('connection', conn => {
       conn.on('open', () => {
+        // ignore binary file transfer connections
+        if (conn.serialization === 'binary' || conn.label === 'file') return
         connsRef.current[conn.peer] = conn
         const count = Object.keys(connsRef.current).length
         setViewers(count)
         setStatus(`👥 ${count} viewer(s) connected`)
-
-        // sync current video state
         const v = videoRef.current
         if (v && v.src && !isScreen) {
           conn.send({ t: 'seek', time: v.currentTime })
@@ -112,61 +101,36 @@ export default function App() {
     })
 
     peer.on('error', e => setStatus('❌ ' + e.type))
-
     peer.on('disconnected', () => {
       setStatus('⚠️ Network issue — reconnecting...')
       setTimeout(() => peer.reconnect(), 1000)
     })
   }
 
-  // wait until DataChannel buffer drains below MAX_BUFFERED
-  function waitForBuffer(conn) {
-    return new Promise(resolve => {
-      try {
-        const dc = conn.dataChannel || conn._dc
-        if (!dc || dc.bufferedAmount < MAX_BUFFERED) return resolve()
-        const check = () => dc.bufferedAmount < MAX_BUFFERED ? resolve() : setTimeout(check, 50)
-        setTimeout(check, 50)
-      } catch { resolve() }
-    })
-  }
-
   async function sendFileTo(conn, file) {
     const totalChunks = Math.ceil(file.size / CHUNK)
-    conn.send({ t: 'file-start', name: file.name, size: file.size, total: totalChunks })
+    // open a separate binary connection for raw fast transfer
+    const binConn = peerRef.current.connect(conn.peer, { reliable: true, serialization: 'binary', label: 'file' })
+    await new Promise(resolve => binConn.on('open', resolve))
+    binConn.send({ t: 'file-start', name: file.name, size: file.size, total: totalChunks })
     for (let i = 0; i < totalChunks; i++) {
-      await waitForBuffer(conn)
       const buf = await file.slice(i * CHUNK, (i + 1) * CHUNK).arrayBuffer()
-      // convert to base64 so PeerJS JSON serialization handles it correctly
-      const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)))
-      conn.send({ t: 'file-chunk', index: i, data: b64 })
+      binConn.send(buf)
       const pct = Math.round(((i + 1) / totalChunks) * 100)
-      if (pct % 5 === 0 || i === totalChunks - 1) setTransferProgress(pct)
-      setStatus(`📤 Sending: ${pct}%`)
+      setTransferProgress(pct)
+      if (i % 20 === 0) setStatus(`📤 Sending: ${pct}%`)
+      if (i % 20 === 0) await new Promise(r => setTimeout(r, 0))
     }
-    conn.send({ t: 'file-end' })
-  }
-
-  async function sendFileTo(conn, file) {
-    const totalChunks = Math.ceil(file.size / CHUNK)
-    conn.send({ t: 'file-start', name: file.name, size: file.size, total: totalChunks })
-    for (let i = 0; i < totalChunks; i += BATCH) {
-      await waitForBuffer(conn)
-      for (let j = i; j < Math.min(i + BATCH, totalChunks); j++) {
-        conn.send({ t: 'file-chunk', index: j, data: file.slice(j * CHUNK, (j + 1) * CHUNK).arrayBuffer() })
-      }
-      setTransferProgress(Math.round((Math.min(i + BATCH, totalChunks) / totalChunks) * 100))
-    }
-    conn.send({ t: 'file-end' })
+    binConn.send({ t: 'file-end' })
+    setTimeout(() => binConn.close(), 1000)
   }
 
   async function handleFile(e) {
     const file = e.target.files[0]
     if (!file) return
-    const url = URL.createObjectURL(file)
     const v = videoRef.current
     v.srcObject = null
-    v.src = url
+    v.src = URL.createObjectURL(file)
     v.load()
     setHasVideo(true)
     setIsScreen(false)
@@ -176,14 +140,10 @@ export default function App() {
     const conns = Object.values(connsRef.current).filter(c => c.open)
     if (conns.length > 0) {
       setTransferring(true)
-      setStatus(`📤 Sending to ${conns.length} viewer(s)...`)
-      // send to all viewers sequentially per viewer
-      for (const conn of conns) {
-        await sendFileTo(conn, file)
-      }
+      for (const conn of conns) await sendFileTo(conn, file)
       setTransferring(false)
       setTransferProgress(0)
-      setStatus(`✅ Video sent to all viewers`)
+      setStatus('✅ Video sent to all viewers')
     }
     peerRef.current._videoFile = file
   }
@@ -203,15 +163,13 @@ export default function App() {
 
   function hostPlay() {
     const v = videoRef.current
-    v.play()
-    setPlaying(true)
+    v.play(); setPlaying(true)
     broadcast({ t: 'play', time: v.currentTime })
   }
 
   function hostPause() {
     const v = videoRef.current
-    v.pause()
-    setPlaying(false)
+    v.pause(); setPlaying(false)
     broadcast({ t: 'pause', time: v.currentTime })
   }
 
@@ -228,33 +186,15 @@ export default function App() {
       })
       streamRef.current = stream
       const v = videoRef.current
-      v.srcObject = stream
-      v.muted = true
-      v.play()
-      setIsScreen(true)
-      setHasVideo(true)
-      setPlaying(true)
-
+      v.srcObject = stream; v.muted = true; v.play()
+      setIsScreen(true); setHasVideo(true); setPlaying(true)
       Object.keys(connsRef.current).forEach(pid => {
         const call = peerRef.current.call(pid, stream)
-        // cap bitrate to 1.5 Mbps for smooth 4G screen share
-        call.peerConnection?.getSenders().forEach(sender => {
-          if (sender.track?.kind === 'video') {
-            const params = sender.getParameters()
-            if (!params.encodings) params.encodings = [{}]
-            params.encodings[0].maxBitrate = 1_500_000
-            params.encodings[0].maxFramerate = 24
-            sender.setParameters(params).catch(() => {})
-          }
-        })
         callsRef.current.push(call)
       })
-
       stream.getVideoTracks()[0].onended = stopScreen
       setStatus('🖥 Sharing screen')
-    } catch {
-      setStatus('Screen share cancelled')
-    }
+    } catch { setStatus('Screen share cancelled') }
   }
 
   function stopScreen() {
@@ -263,9 +203,7 @@ export default function App() {
     callsRef.current.forEach(c => c.close())
     callsRef.current = []
     videoRef.current.srcObject = null
-    setIsScreen(false)
-    setHasVideo(false)
-    setPlaying(false)
+    setIsScreen(false); setHasVideo(false); setPlaying(false)
     setStatus('Screen share stopped')
   }
 
@@ -282,36 +220,23 @@ export default function App() {
 
     let retries = 0
     const maxRetries = 8
-    // 20s timeout — Airtel/Vi symmetric NAT + TCP TURN can take 15s; Jio/BSNL connect in <5s
-    const CONNECT_TIMEOUT = 20000
 
     function tryConnect() {
-      // destroy old conn attempt cleanly
       if (connsRef.current['host']) {
         try { connsRef.current['host'].close() } catch {}
         delete connsRef.current['host']
       }
-
-      const conn = peer.connect(id, {
-        reliable: true,
-      })
-
+      const conn = peer.connect(id, { reliable: true })
       const timeout = setTimeout(() => {
         if (!conn.open) {
           try { conn.close() } catch {}
-          if (retries < maxRetries) {
-            retries++
-            setStatus(`🔄 Retrying... (${retries}/${maxRetries})`)
-            setTimeout(tryConnect, 800)
-          } else {
-            setStatus('❌ Could not connect — check Room ID or ask host to recreate room')
-          }
+          if (retries < maxRetries) { retries++; setStatus(`🔄 Retrying... (${retries}/${maxRetries})`); setTimeout(tryConnect, 1000) }
+          else setStatus('❌ Could not connect — check Room ID')
         }
-      }, CONNECT_TIMEOUT)
+      }, 15000)
 
       conn.on('open', () => {
-        clearTimeout(timeout)
-        retries = 0
+        clearTimeout(timeout); retries = 0
         connsRef.current['host'] = conn
         setStatus('✅ Connected — waiting for host')
       })
@@ -319,114 +244,81 @@ export default function App() {
       conn.on('close', () => {
         delete connsRef.current['host']
         setStatus('⚠️ Disconnected — reconnecting...')
-        setTimeout(() => {
-          if (peer.disconnected) peer.reconnect()
-          else tryConnect()
-        }, 1500)
+        setTimeout(() => peer.disconnected ? peer.reconnect() : tryConnect(), 1500)
       })
       conn.on('error', () => {
         clearTimeout(timeout)
-        if (retries < maxRetries) {
-          retries++
-          setStatus(`🔄 Retrying... (${retries}/${maxRetries})`)
-          setTimeout(tryConnect, 800)
-        } else {
-          setStatus('❌ Connection failed — check Room ID')
-        }
+        if (retries < maxRetries) { retries++; setStatus(`🔄 Retrying... (${retries}/${maxRetries})`); setTimeout(tryConnect, 1000) }
+        else setStatus('❌ Connection failed')
       })
     }
 
-    peer.on('open', () => {
-      setStatus('🔄 Reaching host...')
-      tryConnect()
+    peer.on('open', () => { setStatus('🔄 Reaching host...'); tryConnect() })
+
+    // handle incoming binary file transfer connection from host
+    peer.on('connection', inConn => {
+      if (inConn.serialization === 'binary' || inConn.label === 'file') {
+        let fileTotal = 0
+        let fileReceived = 0
+        inConn.on('data', data => {
+          if (data && typeof data === 'object' && !ArrayBuffer.isView(data) && !(data instanceof ArrayBuffer) && data.t === 'file-start') {
+            chunksRef.current = []
+            fileTotal = data.total
+            fileReceived = 0
+            setTransferring(true)
+            setTransferProgress(0)
+            setStatus(`📥 Receiving: ${data.name} (${(data.size / 1024 / 1024).toFixed(1)} MB)`)
+          } else if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+            const buf = data instanceof ArrayBuffer ? data : data.buffer
+            chunksRef.current.push(buf)
+            fileReceived++
+            const pct = Math.round((fileReceived / fileTotal) * 100)
+            setTransferProgress(pct)
+            if (fileReceived % 10 === 0) setStatus(`📥 Receiving: ${pct}%`)
+          } else if (data && typeof data === 'object' && data.t === 'file-end') {
+            const blob = new Blob(chunksRef.current)
+            const url = URL.createObjectURL(blob)
+            const v = videoRef.current
+            v.srcObject = null; v.src = url; v.load()
+            setHasVideo(true); setIsScreen(false)
+            setTransferring(false); setTransferProgress(0)
+            setStatus('✅ Video ready — waiting for host to play')
+            chunksRef.current = []
+          }
+        })
+        return
+      }
+      // normal JSON control connection (shouldn't happen on viewer but handle gracefully)
     })
 
     peer.on('call', call => {
       call.answer()
       call.on('stream', remote => {
         const v = videoRef.current
-        v.srcObject = remote
-        v.muted = false
-        v.volume = 1
-        v.play().then(() => {
-          setPlaying(true)
-          setHasVideo(true)
-          setIsScreen(true)
-          setStatus('🟢 Watching live screen')
-        }).catch(() => setStatus('Click ▶ Play'))
+        v.srcObject = remote; v.muted = false; v.volume = 1
+        v.play().then(() => { setPlaying(true); setHasVideo(true); setIsScreen(true); setStatus('🟢 Watching live screen') })
+          .catch(() => setStatus('Click ▶ Play'))
       })
       call.on('close', () => { setIsScreen(false); setHasVideo(false); setStatus('Screen share ended') })
     })
 
-    peer.on('disconnected', () => {
-      setStatus('⚠️ Network issue — reconnecting...')
-      setTimeout(() => peer.reconnect(), 1000)
-    })
-
+    peer.on('disconnected', () => { setStatus('⚠️ Reconnecting...'); setTimeout(() => peer.reconnect(), 1000) })
     peer.on('error', e => {
-      if (e.type === 'network' || e.type === 'disconnected') {
-        setStatus('⚠️ Network issue — retrying...')
-        setTimeout(() => peer.reconnect(), 1000)
-      } else {
-        setStatus('❌ ' + e.type + ' — wrong Room ID?')
-      }
+      if (e.type === 'network' || e.type === 'disconnected') setTimeout(() => peer.reconnect(), 1000)
+      else setStatus('❌ ' + e.type)
     })
   }
 
-  // ── SHARED DATA HANDLER ───────────────────────────
+  // ── DATA HANDLER ──────────────────────────────────
   function handleData(msg, fromPeer) {
     const v = videoRef.current
 
-    // file transfer
-    if (msg.t === 'file-start') {
-      chunksRef.current = new Array(msg.total)
-      setTransferring(true)
-      setTransferProgress(0)
-      peerRef.current._fileTotal = msg.total
-      peerRef.current._fileReceived = 0
-      peerRef.current._fileName = msg.name
-      setStatus(`📥 Receiving: ${msg.name} (${(msg.size / 1024 / 1024).toFixed(1)} MB)`)
-    }
-    if (msg.t === 'file-chunk') {
-      // convert base64 back to ArrayBuffer
-      const binary = atob(msg.data)
-      const bytes = new Uint8Array(binary.length)
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-      chunksRef.current[msg.index] = bytes.buffer
-      peerRef.current._fileReceived = (peerRef.current._fileReceived || 0) + 1
-      const pct = Math.round((peerRef.current._fileReceived / peerRef.current._fileTotal) * 100)
-      setTransferProgress(pct)
-      if (pct % 5 === 0) setStatus(`📥 Receiving: ${pct}%`)
-    }
-    if (msg.t === 'file-end') {
-      const total = peerRef.current._fileTotal
-      const received = chunksRef.current.filter(c => c !== undefined).length
-      if (received < total) {
-        setStatus(`⚠️ Only got ${received}/${total} chunks — transfer incomplete`)
-        return
-      }
-      const blob = new Blob(chunksRef.current)
-      const url = URL.createObjectURL(blob)
-      v.srcObject = null
-      v.src = url
-      v.load()
-      setHasVideo(true)
-      setIsScreen(false)
-      setTransferring(false)
-      setTransferProgress(100)
-      setTimeout(() => setTransferProgress(0), 500)
-      setStatus(`✅ Video ready — waiting for host to play`)
-      chunksRef.current = []
-    }
+    if (msg.t === 'file-start') {}
+    if (msg.t === 'file-chunk') {}
+    if (msg.t === 'file-end') {}
 
-    // playback sync
-    if (msg.t === 'src') {
-      v.srcObject = null
-      v.src = msg.src
-      v.load()
-      setHasVideo(true)
-      setIsScreen(false)
-    }
+    if (msg.t === 'src') { v.srcObject = null; v.src = msg.src; v.load(); setHasVideo(true); setIsScreen(false) }
+
     if (msg.t === 'play') {
       isSyncRef.current = true
       if (msg.time !== undefined) v.currentTime = msg.time
@@ -436,8 +328,7 @@ export default function App() {
     if (msg.t === 'pause') {
       isSyncRef.current = true
       if (msg.time !== undefined) v.currentTime = msg.time
-      v.pause()
-      setPlaying(false)
+      v.pause(); setPlaying(false)
       setTimeout(() => { isSyncRef.current = false }, 500)
     }
     if (msg.t === 'seek') {
@@ -446,17 +337,12 @@ export default function App() {
       setTimeout(() => { isSyncRef.current = false }, 500)
     }
 
-    // chat
     if (msg.t === 'chat') {
       setMessages(prev => [...prev, { from: msg.from, text: msg.text, time: msg.time }])
       setUnread(u => u + 1)
     }
 
-    // if viewer triggers play/pause, broadcast to everyone (both directions)
-    if (mode === 'host' && (msg.t === 'play' || msg.t === 'pause' || msg.t === 'seek')) {
-      broadcast(msg, fromPeer)
-    }
-    if (mode === 'host' && msg.t === 'chat') {
+    if (mode === 'host' && (msg.t === 'play' || msg.t === 'pause' || msg.t === 'seek' || msg.t === 'chat')) {
       broadcast(msg, fromPeer)
     }
   }
@@ -464,22 +350,9 @@ export default function App() {
   function viewerTogglePlay() {
     const v = videoRef.current
     const conn = connsRef.current['host']
-    if (v.paused) {
-      v.play()
-      setPlaying(true)
-      conn?.send({ t: 'play', time: v.currentTime })
-    } else {
-      v.pause()
-      setPlaying(false)
-      conn?.send({ t: 'pause', time: v.currentTime })
-    }
+    if (v.paused) { v.play(); setPlaying(true); conn?.send({ t: 'play', time: v.currentTime }) }
+    else { v.pause(); setPlaying(false); conn?.send({ t: 'pause', time: v.currentTime }) }
   }
-
-  useEffect(() => {
-    const onChange = () => setIsFullscreen(!!document.fullscreenElement)
-    document.addEventListener('fullscreenchange', onChange)
-    return () => document.removeEventListener('fullscreenchange', onChange)
-  }, [])
 
   function sendChat(e) {
     e.preventDefault()
@@ -493,11 +366,14 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (chatOpen) {
-      setUnread(0)
-      chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-    }
+    if (chatOpen) { setUnread(0); chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }
   }, [messages, chatOpen])
+
+  useEffect(() => {
+    const onChange = () => setIsFullscreen(!!document.fullscreenElement)
+    document.addEventListener('fullscreenchange', onChange)
+    return () => document.removeEventListener('fullscreenchange', onChange)
+  }, [])
 
   function toggleFullscreen() {
     const container = videoRef.current.parentElement
@@ -507,8 +383,7 @@ export default function App() {
 
   function copyLink() {
     navigator.clipboard.writeText(`${window.location.origin}?room=${roomId}`)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
+    setCopied(true); setTimeout(() => setCopied(false), 2000)
   }
 
   useEffect(() => {
@@ -531,11 +406,9 @@ export default function App() {
           <div className="room-box">
             <h3>👀 Viewer</h3>
             <p className="hint">Paste Room ID or invite link</p>
-            <input
-              type="text" placeholder="Room ID or invite link"
+            <input type="text" placeholder="Room ID or invite link"
               value={joinInput} onChange={e => setJoinInput(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && viewerJoin()}
-            />
+              onKeyDown={e => e.key === 'Enter' && viewerJoin()} />
             <button className="primary-btn" onClick={viewerJoin}>Join Room</button>
           </div>
         </div>
@@ -565,11 +438,9 @@ export default function App() {
             <input type="file" accept="video/*" onChange={handleFile} hidden />
           </label>
           <div className="url-bar">
-            <input
-              type="text" placeholder="Or paste video URL..."
+            <input type="text" placeholder="Or paste video URL..."
               value={urlInput} onChange={e => setUrlInput(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && handleUrlLoad()}
-            />
+              onKeyDown={e => e.key === 'Enter' && handleUrlLoad()} />
             <button onClick={handleUrlLoad}>Load</button>
           </div>
           {!isScreen
@@ -580,9 +451,7 @@ export default function App() {
       )}
 
       <div className="video-container" style={{ display: hasVideo ? 'block' : 'none' }}>
-        <video
-          ref={videoRef}
-          className="video"
+        <video ref={videoRef} className="video"
           onSeeked={() => mode === 'host' && !isSyncRef.current && hostSeek()}
           onEnded={() => setPlaying(false)}
           onClick={() => setChatOpen(false)}
@@ -609,9 +478,7 @@ export default function App() {
       {hasVideo && (
         <div className="controls">
           {mode === 'host' && !isScreen && (
-            playing
-              ? <button onClick={hostPause}>⏸ Pause</button>
-              : <button onClick={hostPlay}>▶ Play</button>
+            playing ? <button onClick={hostPause}>⏸ Pause</button> : <button onClick={hostPlay}>▶ Play</button>
           )}
           {mode === 'viewer' && (
             <button onClick={viewerTogglePlay}>{playing ? '⏸ Pause' : '▶ Play'}</button>
@@ -640,10 +507,8 @@ export default function App() {
                 <div ref={chatEndRef} />
               </div>
               <form className="chat-form" onSubmit={sendChat}>
-                <input
-                  type="text" placeholder="Type a message..."
-                  value={chatInput} onChange={e => setChatInput(e.target.value)}
-                />
+                <input type="text" placeholder="Type a message..."
+                  value={chatInput} onChange={e => setChatInput(e.target.value)} />
                 <button type="submit">Send</button>
               </form>
             </>
