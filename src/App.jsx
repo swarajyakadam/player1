@@ -16,28 +16,7 @@ const ICE = {
   rtcpMuxPolicy: 'require',
 }
 
-const CHUNK = 256 * 1024
 
-async function uploadToCloud(file, onProgress) {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest()
-    const form = new FormData()
-    form.append('file', file)
-    xhr.open('POST', 'https://file.io/?expires=1d')
-    xhr.upload.onprogress = e => {
-      if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100))
-    }
-    xhr.onload = () => {
-      try {
-        const res = JSON.parse(xhr.responseText)
-        if (res.success) resolve(res.link)
-        else reject('Upload failed')
-      } catch { reject('Upload failed') }
-    }
-    xhr.onerror = () => reject('Network error')
-    xhr.send(form)
-  })
-}
 
 function makePeer(id) {
   return new Peer(id || undefined, {
