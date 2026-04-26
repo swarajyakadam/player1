@@ -7,9 +7,13 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "server": "node server.js"
   },
   "dependencies": {
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "peer": "^1.0.2",
     "peerjs": "^1.5.5",
     "react": "^19.1.1",
     "react-dom": "^19.1.1"

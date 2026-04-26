@@ -2,42 +2,40 @@ import { useRef, useState, useEffect } from 'react'
 import Peer from 'peerjs'
 import './App.css'
 
-// Works on all Indian carriers: Jio, Airtel, Vi, BSNL
-// - Jio/BSNL: can do direct P2P or UDP TURN
-// - Airtel/Vi: symmetric NAT, needs TCP:443 TURN
-// Strategy: include both UDP and TCP TURN, let ICE pick the best path per network
+// Metered.ca verified TURN — works on Jio, Airtel, Vi, BSNL (4G/5G)
 const ICE = {
   iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    // Metered — TCP:443 (Airtel/Vi) + UDP (Jio/BSNL)
-    { urls: 'turn:a.relay.metered.ca:443?transport=tcp', username: 'e8dd65f0519bf624f0c4f702', credential: 'uBpJMGGnu9WWWWWW' },
-    { urls: 'turns:a.relay.metered.ca:443',              username: 'e8dd65f0519bf624f0c4f702', credential: 'uBpJMGGnu9WWWWWW' },
-    { urls: 'turn:a.relay.metered.ca:80?transport=tcp',  username: 'e8dd65f0519bf624f0c4f702', credential: 'uBpJMGGnu9WWWWWW' },
-    { urls: 'turn:a.relay.metered.ca:80',                username: 'e8dd65f0519bf624f0c4f702', credential: 'uBpJMGGnu9WWWWWW' },
-    // openrelay fallback — TCP:443 + UDP
-    { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
-    { urls: 'turns:openrelay.metered.ca:443',              username: 'openrelayproject', credential: 'openrelayproject' },
-    { urls: 'turn:openrelay.metered.ca:80',                username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'stun:stun.relay.metered.ca:80' },
+    { urls: 'turn:global.relay.metered.ca:80',                  username: 'ce4d79c0ea31a9556ff1e39f', credential: 's4EIp+6Gsbr6IrEw' },
+    { urls: 'turn:global.relay.metered.ca:80?transport=tcp',    username: 'ce4d79c0ea31a9556ff1e39f', credential: 's4EIp+6Gsbr6IrEw' },
+    { urls: 'turn:global.relay.metered.ca:443',                 username: 'ce4d79c0ea31a9556ff1e39f', credential: 's4EIp+6Gsbr6IrEw' },
+    { urls: 'turns:global.relay.metered.ca:443?transport=tcp',  username: 'ce4d79c0ea31a9556ff1e39f', credential: 's4EIp+6Gsbr6IrEw' },
   ],
   iceCandidatePoolSize: 10,
-  iceTransportPolicy: 'all', // 'all' = try direct first (fast for Jio/BSNL), fall back to TURN (Airtel/Vi)
+  iceTransportPolicy: 'all',
   bundlePolicy: 'max-bundle',
   rtcpMuxPolicy: 'require',
 }
 
-const CHUNK = 256 * 1024 // 256 KB — bigger chunks = fewer round trips on 4G
-const BATCH = 8           // send 8 chunks at once before yielding
-const MAX_BUFFERED = 4 * 1024 * 1024 // pause sending if buffer > 4 MB
+const CHUNK = 512 * 1024  // 512KB per chunk
+const BATCH = 16           // 16 chunks at once = 8MB per batch
+const MAX_BUFFERED = 8 * 1024 * 1024 // pause if buffer > 8MB
 
 
+
+const PEER_SERVER = import.meta.env.VITE_PEER_SERVER || '0.peerjs.com'
+const PEER_PORT = import.meta.env.VITE_PEER_PORT ? parseInt(import.meta.env.VITE_PEER_PORT) : 443
+const PEER_PATH = import.meta.env.VITE_PEER_PATH || '/'
 
 function makePeer(id) {
   return new Peer(id || undefined, {
+    host: PEER_SERVER,
+    port: PEER_PORT,
+    path: PEER_PATH,
+    secure: true,
     config: ICE,
     debug: 0,
-    pingInterval: 4000,
-    trickle: true,
+    pingInterval: 2000,
   })
 }
 
@@ -124,13 +122,12 @@ export default function App() {
   // wait until DataChannel buffer drains below MAX_BUFFERED
   function waitForBuffer(conn) {
     return new Promise(resolve => {
-      const dc = conn.dataChannel
-      if (!dc || dc.bufferedAmount < MAX_BUFFERED) return resolve()
-      const check = () => {
-        if (dc.bufferedAmount < MAX_BUFFERED) resolve()
-        else setTimeout(check, 20)
-      }
-      setTimeout(check, 20)
+      try {
+        const dc = conn.dataChannel || conn._dc
+        if (!dc || dc.bufferedAmount < MAX_BUFFERED) return resolve()
+        const check = () => dc.bufferedAmount < MAX_BUFFERED ? resolve() : setTimeout(check, 10)
+        setTimeout(check, 10)
+      } catch { resolve() }
     })
   }
 
@@ -164,14 +161,16 @@ export default function App() {
     if (conns.length > 0) {
       setTransferring(true)
       setStatus(`📤 Sending to ${conns.length} viewer(s)...`)
-      const totalChunks = Math.ceil(file.size / CHUNK)
+      // pre-read entire file into memory once
+      const fullBuf = await file.arrayBuffer()
+      const totalChunks = Math.ceil(fullBuf.byteLength / CHUNK)
+
       await Promise.all(conns.map(async conn => {
         conn.send({ t: 'file-start', name: file.name, size: file.size, total: totalChunks })
         for (let i = 0; i < totalChunks; i += BATCH) {
           await waitForBuffer(conn)
           for (let j = i; j < Math.min(i + BATCH, totalChunks); j++) {
-            const buf = await file.slice(j * CHUNK, (j + 1) * CHUNK).arrayBuffer()
-            conn.send({ t: 'file-chunk', index: j, data: buf })
+            conn.send({ t: 'file-chunk', index: j, data: fullBuf.slice(j * CHUNK, (j + 1) * CHUNK) })
           }
           setTransferProgress(Math.round((Math.min(i + BATCH, totalChunks) / totalChunks) * 100))
         }
